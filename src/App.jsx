@@ -1079,7 +1079,7 @@ export default function SampleTyper() {
         background: `linear-gradient(180deg, ${T.panel} 0%, ${T.sidebarEnd} 100%)`,
         display: "flex", flexDirection: "column", flexShrink: 0,
       }}>
-        <div style={{ padding: "20px 16px 16px", display: "flex", flexDirection: "column", gap: 12, minWidth: 284 }}>
+        <div style={{ boxSizing: "border-box", padding: "20px 16px 16px", display: "flex", flexDirection: "column", gap: 12, minWidth: 284 }}>
           <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
             <span style={{
               fontFamily: SERIF, fontSize: 18, letterSpacing: ".02em",
@@ -1090,8 +1090,9 @@ export default function SampleTyper() {
             <button className="st-ghost" onClick={toggleTheme}
               title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
               style={{
-                border: `1px solid ${T.edgeSoft}`, width: 28, height: 28, padding: 0,
-                fontSize: 14, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                border: `1px solid ${T.edgeSoft}`, background: T.accentSoft, color: T.accent,
+                width: 28, height: 28, padding: 0, fontSize: 14, flexShrink: 0,
+                display: "flex", alignItems: "center", justifyContent: "center",
               }}>
               {theme === "dark" ? "☀" : "☾"}
             </button>
@@ -1110,7 +1111,7 @@ export default function SampleTyper() {
           </span>
         </div>
 
-        <div className="st-side-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 8px 16px", minWidth: 284 }}>
+        <div className="st-side-scroll" style={{ boxSizing: "border-box", flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 8px 16px", minWidth: 284 }}>
 
           {newFolderOpen && (
             <div style={{ padding: "4px 6px 10px" }}>
@@ -1220,24 +1221,30 @@ export default function SampleTyper() {
           )}
         </div>
 
-        <div style={{ padding: "10px 14px", borderTop: `1px solid ${T.edgeSoft}`, minWidth: 284 }}>
+        <div style={{ boxSizing: "border-box", padding: "10px 14px", borderTop: `1px solid ${T.edgeSoft}`, minWidth: 284 }}>
 
           {driveConfigured() ? (
             <div style={{ marginBottom: 9 }}>
               {driveStatus === "connected" || driveStatus === "syncing" ? (
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.inkDim }}>
                     <span
                       className={driveStatus === "syncing" ? "ink-dot-busy" : ""}
-                      style={{ width: 6, height: 6, borderRadius: "50%", background: driveStatus === "syncing" ? T.warn : T.good }} />
-                    {driveStatus === "syncing" ? "Syncing to Drive…" : "Synced to Google Drive"}
+                      style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: driveStatus === "syncing" ? T.warn : T.good }} />
+                    <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {driveStatus === "syncing" ? "Syncing to Drive…" : "Synced to Google Drive"}
+                    </span>
                   </span>
-                  <span style={{ display: "flex", gap: 4 }}>
-                    <button className="st-ghost" onClick={syncFromDrive} disabled={driveStatus === "syncing"} title="Pull in anything new from Drive" style={{ fontSize: 10.5 }}>
-                      resync
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <button className="st-ghost" onClick={syncFromDrive} disabled={driveStatus === "syncing"}
+                      title="Pull in anything new from Drive"
+                      style={{ flex: 1, border: `1px solid ${T.edgeSoft}`, fontSize: 10.5 }}>
+                      Resync
                     </button>
-                    <button className="st-ghost" onClick={handleDisconnectDrive} style={{ fontSize: 10.5 }}>
-                      disconnect
+                    <button className="st-ghost" onClick={handleDisconnectDrive}
+                      title="Disconnect Google Drive"
+                      style={{ flex: 1, border: `1px solid ${T.edgeSoft}`, fontSize: 10.5 }}>
+                      Disconnect
                     </button>
                   </span>
                 </div>
