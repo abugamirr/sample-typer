@@ -1080,13 +1080,19 @@ export default function SampleTyper() {
         display: "flex", flexDirection: "column", flexShrink: 0,
       }}>
         <div style={{ padding: "20px 16px 16px", display: "flex", flexDirection: "column", gap: 12, minWidth: 284 }}>
-          <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ fontFamily: SERIF, fontSize: 18, letterSpacing: ".02em", whiteSpace: "nowrap" }}>
+          <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <span style={{
+              fontFamily: SERIF, fontSize: 18, letterSpacing: ".02em",
+              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0,
+            }}>
               Sample <span style={{ color: T.accent }}>Typer</span>
             </span>
-            <button className="st-icon" onClick={toggleTheme}
+            <button className="st-ghost" onClick={toggleTheme}
               title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-              style={{ fontSize: 15 }}>
+              style={{
+                border: `1px solid ${T.edgeSoft}`, width: 28, height: 28, padding: 0,
+                fontSize: 14, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
               {theme === "dark" ? "☀" : "☾"}
             </button>
           </span>
