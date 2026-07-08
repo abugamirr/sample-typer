@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  driveConfigured, isDriveConnected, connectDrive, disconnectDrive,
+  driveConfigured, isDriveConnected, connectDrive, disconnectDrive, trySilentConnect,
   ensureRootFolder, ensureFolder, renameDriveFile, moveDriveFile, trashDriveFile, pushDocToDrive,
   listDriveChildren, exportDriveDocHtml,
 } from "./drive";
@@ -158,6 +158,7 @@ export default function SampleTyper() {
           : { folders: parsed.folders || [], docs: parsed.docs || [] };
         setFolders(lib.folders);
         setDocs(lib.docs);
+        latestLib.current = { folders: lib.folders, docs: lib.docs }; // ahead of the render — syncFromDrive below reads this
         const first = [...lib.docs].sort(byRecent)[0];
         if (first) await openDoc(first.id);
       } catch { /* first visit */ }
@@ -171,6 +172,15 @@ export default function SampleTyper() {
         }
       } catch { /* no prefs yet */ }
       setLoading(false);
+
+      /* try to pick the Drive connection back up without making the user
+         click "Connect" again every single reload */
+      if (driveConfigured()) {
+        setDriveStatus("connecting");
+        const ok = await trySilentConnect();
+        if (ok) { setDriveStatus("connected"); await syncFromDrive(); }
+        else setDriveStatus("disconnected");
+      }
     })();
     return () => {
       clearTimeout(saveTimer.current);

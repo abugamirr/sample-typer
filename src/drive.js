@@ -49,8 +49,7 @@ function requestToken(prompt) {
   });
 }
 
-export async function connectDrive() {
-  if (!CLIENT_ID) throw new Error("VITE_GOOGLE_CLIENT_ID is not set — see DRIVE_SETUP.md");
+async function ensureTokenClient() {
   await loadGis();
   if (!tokenClient) {
     tokenClient = window.google.accounts.oauth2.initTokenClient({
@@ -59,7 +58,28 @@ export async function connectDrive() {
       callback: () => {}, // replaced per-request in requestToken()
     });
   }
+}
+
+export async function connectDrive() {
+  if (!CLIENT_ID) throw new Error("VITE_GOOGLE_CLIENT_ID is not set — see DRIVE_SETUP.md");
+  await ensureTokenClient();
   return requestToken("consent");
+}
+
+/* Called on every page load: if this browser already granted consent and
+   still has an active Google session, Google issues a fresh token with no
+   popup and no click. If not, it fails quietly — no UI shown, no prompt —
+   and the caller just falls back to the normal "Connect" button. */
+export async function trySilentConnect() {
+  if (!CLIENT_ID) return false;
+  try {
+    await ensureTokenClient();
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("silent connect timed out")), 6000));
+    await Promise.race([requestToken(""), timeout]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function disconnectDrive() {
@@ -191,9 +211,51 @@ export async function listDriveChildren(parentId) {
   return res.files || [];
 }
 
+const BLOCK_TAGS = new Set(["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li"]);
+const isBoldNode = (el) => el.tagName === "B" || el.tagName === "STRONG" || /font-weight:\s*(bold|[6-9]00)/i.test(el.getAttribute("style") || "");
+const isItalicNode = (el) => el.tagName === "I" || el.tagName === "EM" || /font-style:\s*italic/i.test(el.getAttribute("style") || "");
+
+/* Collapse a paragraph's inline soup (Docs wraps every run of text in its
+   own styled <span>) down to plain text plus bold/italic only — everything
+   else Docs bakes inline (color, font-family, font-size, margins) is
+   dropped so the app's own theme and heading rule can apply instead. */
+function sanitizeInlineFragment(node) {
+  let out = "";
+  for (const child of node.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) { out += escapeHtmlEntities(child.textContent); continue; }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    if (child.tagName === "BR") { out += "<br>"; continue; }
+    let inner = sanitizeInlineFragment(child);
+    if (isBoldNode(child)) inner = `<b>${inner}</b>`;
+    if (isItalicNode(child)) inner = `<i>${inner}</i>`;
+    out += inner;
+  }
+  return out;
+}
+const escapeHtmlEntities = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/* Walk Docs' block structure (<p>, headings, list items, wrapper <div>s)
+   and flatten it into one plain <div> per line — the exact shape the
+   editor itself produces, so nothing here fights the app's own styling. */
+function sanitizeImportedHtml(bodyEl) {
+  const lines = [];
+  const walk = (root) => {
+    for (const child of root.children) {
+      if (BLOCK_TAGS.has(child.tagName.toLowerCase())) {
+        lines.push(sanitizeInlineFragment(child).trim());
+      } else {
+        walk(child);
+      }
+    }
+  };
+  walk(bodyEl);
+  if (!lines.length) return "<div><br></div>";
+  return lines.map((l) => `<div>${l || "<br>"}</div>`).join("");
+}
+
 /* The mirror image of pushDocToDrive's wrapping — Drive's HTML export comes
-   back as a full document with <head>/styles, so unwrap to just the body
-   before handing it to the editor. */
+   back as a full document, heavily inline-styled by Docs itself, so unwrap
+   and sanitize it before it ever reaches the editor. */
 export async function exportDriveDocHtml(fileId) {
   const token = await ensureToken();
   const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=text/html`, {
@@ -202,5 +264,5 @@ export async function exportDriveDocHtml(fileId) {
   if (!res.ok) throw new Error(`Drive export ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const raw = await res.text();
   const parsed = new DOMParser().parseFromString(raw, "text/html");
-  return parsed.body ? parsed.body.innerHTML : raw;
+  return parsed.body ? sanitizeImportedHtml(parsed.body) : raw;
 }
