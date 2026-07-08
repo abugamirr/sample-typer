@@ -28,22 +28,53 @@ import {
    Autosaves every keystroke to persistent storage.
 ———————————————————————————————————————————————————————— */
 
-const T = {
-  bg: "#171412",
-  bgDeep: "#131110",
-  panel: "#1E1A16",
-  edge: "rgba(150,125,95,0.13)",
-  edgeSoft: "rgba(150,125,95,0.08)",
-  ink: "#E9E2D4",
-  inkBright: "#F3EDDF",
-  inkDim: "#9A907F",
-  inkFaint: "#605A4E",
-  accent: "#C77B52",
-  accentSoft: "rgba(199,123,82,0.14)",
-  accentGlow: "rgba(199,123,82,0.32)",
-  good: "#7FA37A",
-  warn: "#C9A26B",
-  rowHover: "rgba(233,226,212,0.035)",
+const THEMES = {
+  dark: {
+    bg: "#171412",
+    bgDeep: "#131110",
+    panel: "#1E1A16",
+    edge: "rgba(150,125,95,0.13)",
+    edgeSoft: "rgba(150,125,95,0.08)",
+    ink: "#E9E2D4",
+    inkBright: "#F3EDDF",
+    inkDim: "#9A907F",
+    inkFaint: "#605A4E",
+    accent: "#C77B52",
+    accentSoft: "rgba(199,123,82,0.14)",
+    accentGlow: "rgba(199,123,82,0.32)",
+    good: "#7FA37A",
+    warn: "#C9A26B",
+    rowHover: "rgba(233,226,212,0.035)",
+    gradientEdge: "#1E1915",
+    sidebarEnd: "#1A1613",
+    bloom1: "rgba(199,123,82,0.55)",
+    bloom2: "rgba(199,123,82,0.20)",
+    grainOpacity: 0.05,
+    grainBlend: "overlay",
+  },
+  light: {
+    bg: "#e9dcb8",
+    bgDeep: "#ddcca0",
+    panel: "#f3ead0",
+    edge: "rgba(90,68,40,0.16)",
+    edgeSoft: "rgba(90,68,40,0.09)",
+    ink: "#3A2F22",
+    inkBright: "#241C12",
+    inkDim: "#7A6A4E",
+    inkFaint: "#A6987A",
+    accent: "#A85D34",
+    accentSoft: "rgba(168,93,52,0.14)",
+    accentGlow: "rgba(168,93,52,0.30)",
+    good: "#4F7A4A",
+    warn: "#96712E",
+    rowHover: "rgba(58,47,34,0.045)",
+    gradientEdge: "#f5ecd3",
+    sidebarEnd: "#ddcca0",
+    bloom1: "rgba(168,93,52,0.55)",
+    bloom2: "rgba(168,93,52,0.20)",
+    grainOpacity: 0.035,
+    grainBlend: "multiply",
+  },
 };
 
 const SERIF = "'Charter', 'Iowan Old Style', Georgia, 'Times New Roman', serif";
@@ -125,6 +156,7 @@ export default function SampleTyper() {
   const [goalEditing, setGoalEditing] = useState(false);
   const [goalInput, setGoalInput] = useState("");
   const [lastBackupAt, setLastBackupAt] = useState(null);
+  const [theme, setTheme] = useState("dark");
 
   /* Google Drive live sync */
   const [driveStatus, setDriveStatus] = useState("disconnected"); // disconnected | connecting | connected | syncing | error
@@ -146,6 +178,7 @@ export default function SampleTyper() {
   const prefsRef = useRef({});
   latest.current = { id: activeId, html: bodyHtml };
   latestLib.current = { folders, docs };
+  const T = THEMES[theme];
 
   /* ——— load library, migrating older formats ——— */
   useEffect(() => {
@@ -169,6 +202,7 @@ export default function SampleTyper() {
           prefsRef.current = p;
           if (p.goal) setGoal(p.goal);
           if (p.lastBackupAt) setLastBackupAt(p.lastBackupAt);
+          if (p.theme) setTheme(p.theme);
         }
       } catch { /* no prefs yet */ }
       setLoading(false);
@@ -680,6 +714,13 @@ export default function SampleTyper() {
     try { await window.storage.set("writer:prefs", JSON.stringify(prefsRef.current)); } catch { /* memory only */ }
   };
   const saveGoal = (g) => { setGoal(g); setGoalEditing(false); savePrefs({ goal: g }); };
+  const toggleTheme = () => {
+    setTheme((t) => {
+      const next = t === "dark" ? "light" : "dark";
+      savePrefs({ theme: next });
+      return next;
+    });
+  };
 
   /* ——— backup & restore (the Google Drive bridge) ——— */
   const [backupBusy, setBackupBusy] = useState(false);
@@ -745,9 +786,42 @@ export default function SampleTyper() {
   /* ——— global keyboard ——— */
   useEffect(() => {
     const onKey = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(); }
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f") { e.preventDefault(); setFocus((f) => !f); }
-      if (e.key === "Escape" && focus) setFocus(false);
+      const t = e.target;
+      const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(); return; }
+
+      /* Alt+F (or ⌘⇧F) toggles focus mode; Esc already exits it below */
+      if ((e.altKey && e.key.toLowerCase() === "f") || ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f")) {
+        if (!activeId) return;
+        e.preventDefault();
+        setFocus((f) => !f);
+        return;
+      }
+
+      /* Esc backs out of whatever's open, innermost first, then exits focus */
+      if (e.key === "Escape") {
+        if (confirmDelete) { setConfirmDelete(null); return; }
+        if (confirmDissolve) { setConfirmDissolve(null); return; }
+        if (moveMenuFor) { setMoveMenuFor(null); return; }
+        if (focus) { setFocus(false); return; }
+        return;
+      }
+
+      if (typing) return; // Delete/Enter below must never hijack normal text entry
+
+      /* Delete removes the open draft — first press asks, second confirms */
+      if (e.key === "Delete") {
+        if (confirmDelete) { e.preventDefault(); deleteDoc(confirmDelete); return; }
+        if (activeId) { e.preventDefault(); setMoveMenuFor(null); setConfirmDelete(activeId); }
+        return;
+      }
+
+      /* Enter confirms whichever inline confirmation is showing */
+      if (e.key === "Enter") {
+        if (confirmDelete) { e.preventDefault(); deleteDoc(confirmDelete); return; }
+        if (confirmDissolve) { e.preventDefault(); dissolveFolder(confirmDissolve); return; }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -848,7 +922,7 @@ export default function SampleTyper() {
                 ⇥
               </button>
               <button className="st-icon" onClick={(e) => { e.stopPropagation(); setConfirmDelete(d.id); setMoveMenuFor(null); }}
-                title="Delete draft"
+                title="Delete draft (Delete key, then Enter, while it's open)"
                 style={{ fontSize: 13 }}>
                 ×
               </button>
@@ -907,7 +981,7 @@ export default function SampleTyper() {
       style={{
         height: "100vh",
         overflow: "hidden", /* the window never scrolls — only the page inside does */
-        background: `radial-gradient(1400px 900px at 72% -12%, #1E1915 0%, ${T.bg} 55%, ${T.bgDeep} 100%)`,
+        background: `radial-gradient(1400px 900px at 72% -12%, ${T.gradientEdge} 0%, ${T.bg} 55%, ${T.bgDeep} 100%)`,
         color: T.ink, display: "flex", fontFamily: UI, position: "relative",
       }}
       onClick={() => moveMenuFor && setMoveMenuFor(null)}>
@@ -977,7 +1051,7 @@ export default function SampleTyper() {
       {/* paper grain — a faint tooth over the whole surface */}
       <div aria-hidden style={{
         position: "fixed", inset: 0, pointerEvents: "none", zIndex: 50,
-        opacity: 0.05, mixBlendMode: "overlay",
+        opacity: T.grainOpacity, mixBlendMode: T.grainBlend,
         backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E")`,
       }} />
 
@@ -992,7 +1066,7 @@ export default function SampleTyper() {
       {/* the ink bloom — repositioned and re-lit on every keystroke */}
       <div ref={bloomRef} aria-hidden style={{
         position: "fixed", width: 34, height: 34, borderRadius: "50%",
-        background: `radial-gradient(circle, rgba(199,123,82,0.55) 0%, rgba(199,123,82,0.20) 40%, transparent 70%)`,
+        background: `radial-gradient(circle, ${T.bloom1} 0%, ${T.bloom2} 40%, transparent 70%)`,
         pointerEvents: "none", zIndex: 45, opacity: 0,
       }} />
 
@@ -1002,12 +1076,19 @@ export default function SampleTyper() {
         transition: "width .25s ease",
         overflow: "hidden",
         borderRight: sidebarOpen ? `1px solid ${T.edgeSoft}` : "none",
-        background: `linear-gradient(180deg, ${T.panel} 0%, #1A1613 100%)`,
+        background: `linear-gradient(180deg, ${T.panel} 0%, ${T.sidebarEnd} 100%)`,
         display: "flex", flexDirection: "column", flexShrink: 0,
       }}>
         <div style={{ padding: "20px 16px 16px", display: "flex", flexDirection: "column", gap: 12, minWidth: 284 }}>
-          <span style={{ fontFamily: SERIF, fontSize: 18, letterSpacing: ".02em", whiteSpace: "nowrap" }}>
-            Sample <span style={{ color: T.accent }}>Typer</span>
+          <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontFamily: SERIF, fontSize: 18, letterSpacing: ".02em", whiteSpace: "nowrap" }}>
+              Sample <span style={{ color: T.accent }}>Typer</span>
+            </span>
+            <button className="st-icon" onClick={toggleTheme}
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              style={{ fontSize: 15 }}>
+              {theme === "dark" ? "☀" : "☾"}
+            </button>
           </span>
           <span style={{ display: "flex", gap: 8 }}>
             <button className="st-ghost"
@@ -1255,7 +1336,7 @@ export default function SampleTyper() {
               </div>
 
               <button className="st-ghost" onClick={() => setFocus((f) => !f)}
-                title="Focus mode — everything but the page fades away (⌘⇧F, Esc to exit)"
+                title="Focus mode — everything but the page fades away (Alt+F or ⌘⇧F, Esc to exit)"
                 style={{
                   border: `1px solid ${focus ? T.accent : T.edgeSoft}`,
                   color: focus ? T.accent : undefined,
