@@ -993,30 +993,32 @@ export default function SampleTyper() {
 
       {/* ———— sidebar ———— */}
       <aside style={{
-        width: sidebarOpen ? 264 : 0,
+        width: sidebarOpen ? 284 : 0,
         transition: "width .25s ease",
         overflow: "hidden",
         borderRight: sidebarOpen ? `1px solid ${T.edgeSoft}` : "none",
         background: `linear-gradient(180deg, ${T.panel} 0%, #1A1613 100%)`,
         display: "flex", flexDirection: "column", flexShrink: 0,
       }}>
-        <div style={{ padding: "20px 14px 12px", display: "flex", alignItems: "baseline", justifyContent: "space-between", minWidth: 264 }}>
+        <div style={{ padding: "20px 16px 16px", display: "flex", flexDirection: "column", gap: 12, minWidth: 284 }}>
           <span style={{ fontFamily: SERIF, fontSize: 18, letterSpacing: ".02em", whiteSpace: "nowrap" }}>
             Sample <span style={{ color: T.accent }}>Typer</span>
           </span>
-          <span style={{ display: "flex", gap: 2 }}>
+          <span style={{ display: "flex", gap: 8 }}>
             <button className="st-ghost"
               onClick={() => { setNewFolderOpen(true); setTimeout(() => document.getElementById("nf-input")?.focus(), 30); }}
-              title="New folder">
+              title="New folder"
+              style={{ border: `1px solid ${T.edgeSoft}`, padding: "6px 12px" }}>
               + folder
             </button>
-            <button className="st-ghost" onClick={() => newDoc(null)} title="New draft">
+            <button className="st-ghost" onClick={() => newDoc(null)} title="New draft"
+              style={{ border: `1px solid ${T.edgeSoft}`, padding: "6px 12px" }}>
               + draft
             </button>
           </span>
         </div>
 
-        <div className="st-side-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 8px 16px", minWidth: 264 }}>
+        <div className="st-side-scroll" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 8px 16px", minWidth: 284 }}>
 
           {newFolderOpen && (
             <div style={{ padding: "4px 6px 10px" }}>
@@ -1126,7 +1128,7 @@ export default function SampleTyper() {
           )}
         </div>
 
-        <div style={{ padding: "10px 14px", borderTop: `1px solid ${T.edgeSoft}`, minWidth: 264 }}>
+        <div style={{ padding: "10px 14px", borderTop: `1px solid ${T.edgeSoft}`, minWidth: 284 }}>
 
           {driveConfigured() ? (
             <div style={{ marginBottom: 9 }}>
