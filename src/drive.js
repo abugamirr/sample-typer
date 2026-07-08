@@ -6,7 +6,12 @@
 ———————————————————————————————————————————————————————— */
 
 const SCOPE = "https://www.googleapis.com/auth/drive.file";
-const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+/* Not a secret — Client IDs ship inside every OAuth request and the built JS
+   bundle regardless. The real access boundary is Google's Authorized
+   JavaScript Origins allowlist plus the OAuth consent screen's test-user
+   list, not hiding this string. Falls back to this project's ID so it works
+   without needing a platform env var configured (e.g. on Vercel's free tier). */
+const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "458772377918-fa3617rsh2eluujqdd0eca4m4i2g66mh.apps.googleusercontent.com";
 const ROOT_FOLDER_NAME = "Sample Typer";
 
 let tokenClient = null;
