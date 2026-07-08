@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  driveConfigured, isDriveConnected, connectDrive, disconnectDrive, trySilentConnect,
+  driveConfigured, isDriveConnected, connectDrive, disconnectDrive, trySilentConnect, restoreStoredToken,
   ensureRootFolder, ensureFolder, renameDriveFile, moveDriveFile, trashDriveFile, pushDocToDrive,
   listDriveChildren, exportDriveDocHtml,
 } from "./drive";
@@ -176,10 +176,15 @@ export default function SampleTyper() {
       /* try to pick the Drive connection back up without making the user
          click "Connect" again every single reload */
       if (driveConfigured()) {
-        setDriveStatus("connecting");
-        const ok = await trySilentConnect();
-        if (ok) { setDriveStatus("connected"); await syncFromDrive(); }
-        else setDriveStatus("disconnected");
+        if (restoreStoredToken()) {
+          setDriveStatus("connected");
+          await syncFromDrive();
+        } else {
+          setDriveStatus("connecting");
+          const ok = await trySilentConnect();
+          if (ok) { setDriveStatus("connected"); await syncFromDrive(); }
+          else setDriveStatus("disconnected");
+        }
       }
     })();
     return () => {

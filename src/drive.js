@@ -14,6 +14,8 @@ const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "458772377918-fa3617rsh2eluujqdd0eca4m4i2g66mh.apps.googleusercontent.com";
 const ROOT_FOLDER_NAME = "Sample Typer";
 
+const TOKEN_STORAGE_KEY = "sample-typer:drive-token";
+
 let tokenClient = null;
 let accessToken = null;
 let tokenExpiresAt = 0;
@@ -22,6 +24,32 @@ let gisReady = null;
 
 export const driveConfigured = () => Boolean(CLIENT_ID);
 export const isDriveConnected = () => Boolean(accessToken) && Date.now() < tokenExpiresAt;
+
+function saveTokenToStorage() {
+  try { localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ accessToken, tokenExpiresAt })); } catch { /* storage unavailable */ }
+}
+function clearStoredToken() {
+  try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch { /* ignore */ }
+}
+
+/* Restores a still-valid token saved on a previous page load — instant,
+   no network round trip, and immune to the third-party-cookie/popup
+   issues that make Google's own silent reauth (below) unreliable. This
+   is what actually keeps a page reload connected; trySilentConnect is
+   only the fallback once the cached token has genuinely expired. */
+export function restoreStoredToken() {
+  try {
+    const raw = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (!raw) return false;
+    const { accessToken: at, tokenExpiresAt: exp } = JSON.parse(raw);
+    if (!at || !exp || Date.now() >= exp) { clearStoredToken(); return false; }
+    accessToken = at;
+    tokenExpiresAt = exp;
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function loadGis() {
   if (gisReady) return gisReady;
@@ -43,6 +71,7 @@ function requestToken(prompt) {
       if (resp.error) { reject(new Error(resp.error_description || resp.error)); return; }
       accessToken = resp.access_token;
       tokenExpiresAt = Date.now() + (resp.expires_in - 60) * 1000;
+      saveTokenToStorage();
       resolve(accessToken);
     };
     tokenClient.requestAccessToken({ prompt });
@@ -55,6 +84,7 @@ async function ensureTokenClient() {
     tokenClient = window.google.accounts.oauth2.initTokenClient({
       client_id: CLIENT_ID,
       scope: SCOPE,
+      use_fedcm_for_prompt: true, // Google's modern replacement for the third-party-cookie silent flow
       callback: () => {}, // replaced per-request in requestToken()
     });
   }
@@ -89,12 +119,12 @@ export function disconnectDrive() {
   accessToken = null;
   tokenExpiresAt = 0;
   rootFolderId = null;
+  clearStoredToken();
 }
 
 async function ensureToken() {
   if (isDriveConnected()) return accessToken;
-  if (!tokenClient) throw new Error("Google Drive is not connected");
-  await loadGis();
+  await ensureTokenClient();
   return requestToken(""); // silent renewal — the user already granted consent
 }
 
