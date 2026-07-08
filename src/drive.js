@@ -181,3 +181,26 @@ export async function pushDocToDrive({ driveFileId, name, html, parentId }) {
   const json = await res.json();
   return json.id;
 }
+
+/* Everything directly inside a folder — used to rebuild the local library
+   from what's actually sitting in Drive (a fresh device, a cleared browser,
+   another login). */
+export async function listDriveChildren(parentId) {
+  const q = encodeURIComponent(`'${parentId}' in parents and trashed=false`);
+  const res = await driveFetch(`files?q=${q}&fields=files(id,name,mimeType,modifiedTime)&pageSize=1000&spaces=drive`);
+  return res.files || [];
+}
+
+/* The mirror image of pushDocToDrive's wrapping — Drive's HTML export comes
+   back as a full document with <head>/styles, so unwrap to just the body
+   before handing it to the editor. */
+export async function exportDriveDocHtml(fileId) {
+  const token = await ensureToken();
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=text/html`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Drive export ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const raw = await res.text();
+  const parsed = new DOMParser().parseFromString(raw, "text/html");
+  return parsed.body ? parsed.body.innerHTML : raw;
+}

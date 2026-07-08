@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   driveConfigured, isDriveConnected, connectDrive, disconnectDrive,
   ensureRootFolder, ensureFolder, renameDriveFile, moveDriveFile, trashDriveFile, pushDocToDrive,
+  listDriveChildren, exportDriveDocHtml,
 } from "./drive";
 
 /* ————————————————————————————————————————————————————————
@@ -327,12 +328,77 @@ export default function SampleTyper() {
     driveSyncTimer.current = setTimeout(() => syncDocToDrive(id, html), 2000);
   };
 
+  /* Pull the library back from Drive — reconciles folders and docs that
+     exist there but not locally (a new device, a cleared browser), and
+     refreshes any local doc Drive holds a newer copy of. Newest wins,
+     mirroring the JSON Restore merge logic. */
+  const syncFromDrive = async () => {
+    if (!isDriveConnected()) return;
+    setDriveStatus("syncing");
+    try {
+      const rootId = await ensureRootFolder();
+      const rootChildren = await listDriveChildren(rootId);
+      const driveFolders = rootChildren.filter((f) => f.mimeType === "application/vnd.google-apps.folder");
+      const rootDocs = rootChildren.filter((f) => f.mimeType === "application/vnd.google-apps.document");
+
+      let nextFolders = [...latestLib.current.folders];
+      const folderIdByDriveId = new Map(nextFolders.filter((f) => f.driveFolderId).map((f) => [f.driveFolderId, f.id]));
+      for (const df of driveFolders) {
+        if (!folderIdByDriveId.has(df.id)) {
+          const localId = uid();
+          nextFolders.push({ id: localId, name: df.name, collapsed: false, driveFolderId: df.id });
+          folderIdByDriveId.set(df.id, localId);
+        }
+      }
+
+      const allDriveDocs = rootDocs.map((d) => ({ ...d, localFolderId: null }));
+      for (const df of driveFolders) {
+        const localFolderId = folderIdByDriveId.get(df.id);
+        const children = await listDriveChildren(df.id);
+        allDriveDocs.push(...children.filter((c) => c.mimeType === "application/vnd.google-apps.document").map((d) => ({ ...d, localFolderId })));
+      }
+
+      let nextDocs = [...latestLib.current.docs];
+      const docIdByDriveId = new Map(nextDocs.filter((d) => d.driveFileId).map((d) => [d.driveFileId, d.id]));
+      let refreshedActive = false;
+
+      for (const dd of allDriveDocs) {
+        const driveModified = new Date(dd.modifiedTime).getTime();
+        const localId = docIdByDriveId.get(dd.id);
+        const localMeta = localId ? nextDocs.find((d) => d.id === localId) : null;
+        if (localMeta && driveModified <= (localMeta.updatedAt || 0)) continue; // local is newer or same — keep it
+
+        const html = await exportDriveDocHtml(dd.id);
+        let mode = "prose";
+        if (localId) {
+          try {
+            const res = await window.storage.get(`writer:doc:${localId}`);
+            if (res) mode = JSON.parse(res.value).mode || "prose";
+          } catch { /* default to prose */ }
+        }
+        const id = localId || uid();
+        const entry = { id, title: dd.name, updatedAt: driveModified, words: countWordsHtml(html), folderId: dd.localFolderId, driveFileId: dd.id };
+        nextDocs = localId ? nextDocs.map((d) => (d.id === id ? entry : d)) : [entry, ...nextDocs];
+        await window.storage.set(`writer:doc:${id}`, JSON.stringify({ id, title: dd.name, body: html, format: "html", mode, folderId: dd.localFolderId, updatedAt: driveModified, driveFileId: dd.id }));
+        if (id === activeId) refreshedActive = true;
+      }
+
+      await persistLib({ folders: nextFolders, docs: nextDocs });
+      if (refreshedActive) await openDoc(activeId);
+      else if (!activeId && nextDocs.length) await openDoc([...nextDocs].sort(byRecent)[0].id);
+      setDriveStatus("connected");
+    } catch (e) {
+      setDriveStatus("error");
+      setDriveError(e.message || String(e));
+    }
+  };
+
   const handleConnectDrive = async () => {
     setDriveStatus("connecting");
     setDriveError("");
     try {
       await connectDrive();
-      setDriveStatus("connected");
+      await syncFromDrive();
       if (activeId) scheduleDriveSync(activeId, latest.current.html);
     } catch (e) {
       setDriveStatus("error");
@@ -1062,9 +1128,14 @@ export default function SampleTyper() {
                       style={{ width: 6, height: 6, borderRadius: "50%", background: driveStatus === "syncing" ? T.warn : T.good }} />
                     {driveStatus === "syncing" ? "Syncing to Drive…" : "Synced to Google Drive"}
                   </span>
-                  <button className="st-ghost" onClick={handleDisconnectDrive} style={{ fontSize: 10.5 }}>
-                    disconnect
-                  </button>
+                  <span style={{ display: "flex", gap: 4 }}>
+                    <button className="st-ghost" onClick={syncFromDrive} disabled={driveStatus === "syncing"} title="Pull in anything new from Drive" style={{ fontSize: 10.5 }}>
+                      resync
+                    </button>
+                    <button className="st-ghost" onClick={handleDisconnectDrive} style={{ fontSize: 10.5 }}>
+                      disconnect
+                    </button>
+                  </span>
                 </div>
               ) : (
                 <button className="st-ghost" onClick={handleConnectDrive} disabled={driveStatus === "connecting"}
