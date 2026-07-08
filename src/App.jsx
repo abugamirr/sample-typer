@@ -1,4 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  driveConfigured, isDriveConnected, connectDrive, disconnectDrive,
+  ensureRootFolder, ensureFolder, renameDriveFile, moveDriveFile, trashDriveFile, pushDocToDrive,
+} from "./drive";
 
 /* ————————————————————————————————————————————————————————
    SAMPLE TYPER v5 — a quiet writing room for scripts & prose
@@ -15,8 +19,11 @@ import { useState, useEffect, useRef, useCallback } from "react";
      while your cursor is over the page edge.
    • Softer palette pass — warm gradients instead of hard
      borders, hover glow on every row.
-   • Backup all → one .json into your Google Drive folder;
+   • Backup all → one .json, for a manual copy anywhere you like;
      Restore merges it back, newest version of each draft wins.
+   • Connect Google Drive and every draft lives there too, as a
+     real, editable Google Doc — synced live as you type, filed
+     into matching Drive folders.
    Autosaves every keystroke to persistent storage.
 ———————————————————————————————————————————————————————— */
 
@@ -118,6 +125,12 @@ export default function SampleTyper() {
   const [goalInput, setGoalInput] = useState("");
   const [lastBackupAt, setLastBackupAt] = useState(null);
 
+  /* Google Drive live sync */
+  const [driveStatus, setDriveStatus] = useState("disconnected"); // disconnected | connecting | connected | syncing | error
+  const [driveError, setDriveError] = useState("");
+  const [activeDriveFileId, setActiveDriveFileId] = useState(null);
+  const driveSyncTimer = useRef(null);
+
   const saveTimer = useRef(null);
   const retryTimer = useRef(null);
   const latest = useRef({ id: null, html: "" });
@@ -201,6 +214,7 @@ export default function SampleTyper() {
         setTitle(firstLineTitle(html));
         setMode(doc.mode || "prose");
         setStatus("saved");
+        setActiveDriveFileId(doc.driveFileId || null);
         const text = htmlToText(html);
         prevWordCount.current = countWordsText(text);
         prevLen.current = text.length;
@@ -219,6 +233,7 @@ export default function SampleTyper() {
         prevWordCount.current = 0;
         prevLen.current = 0;
         setIsEmpty(true);
+        setActiveDriveFileId(meta.driveFileId || null);
         setDocNonce((n) => n + 1);
       }
     }
@@ -231,15 +246,16 @@ export default function SampleTyper() {
     try {
       const meta = latestLib.current.docs.find((d) => d.id === id);
       const t = firstLineTitle(html);
-      const doc = { id, title: t, body: html, format: "html", mode: m, folderId: meta?.folderId ?? null, updatedAt: now };
+      const doc = { id, title: t, body: html, format: "html", mode: m, folderId: meta?.folderId ?? null, updatedAt: now, driveFileId: meta?.driveFileId ?? null };
       await window.storage.set(`writer:doc:${id}`, JSON.stringify(doc));
       const nextDocs = [
-        { id, title: t, updatedAt: now, words: countWordsHtml(html), folderId: meta?.folderId ?? null },
+        { id, title: t, updatedAt: now, words: countWordsHtml(html), folderId: meta?.folderId ?? null, driveFileId: meta?.driveFileId ?? null },
         ...latestLib.current.docs.filter((d) => d.id !== id),
       ];
       const ok = await persistLib({ folders: latestLib.current.folders, docs: nextDocs });
       if (!ok) return;
       if (latest.current.id === id && latest.current.html === html) setStatus("saved");
+      scheduleDriveSync(id, html);
     } catch {
       setStatus("offline");
       clearTimeout(retryTimer.current);
@@ -262,6 +278,73 @@ export default function SampleTyper() {
   const saveNow = () => {
     clearTimeout(saveTimer.current);
     if (activeId) persist(activeId, latest.current.html, mode);
+  };
+
+  /* ——— Google Drive live sync ——— */
+  const resolveDriveFolder = async (folderId, folder) => {
+    if (!folderId) return ensureRootFolder();
+    if (folder?.driveFolderId) return folder.driveFolderId;
+    const parentDriveId = await ensureRootFolder();
+    const driveFolderId = await ensureFolder(folder?.name || "Untitled folder", parentDriveId);
+    const nextFolders = latestLib.current.folders.map((f) => (f.id === folderId ? { ...f, driveFolderId } : f));
+    await persistLib({ folders: nextFolders, docs: latestLib.current.docs });
+    return driveFolderId;
+  };
+
+  const attachDriveFileId = async (id, fileId) => {
+    const nextDocs = latestLib.current.docs.map((d) => (d.id === id ? { ...d, driveFileId: fileId } : d));
+    await persistLib({ folders: latestLib.current.folders, docs: nextDocs });
+    try {
+      const res = await window.storage.get(`writer:doc:${id}`);
+      if (res) {
+        const doc = JSON.parse(res.value);
+        await window.storage.set(`writer:doc:${id}`, JSON.stringify({ ...doc, driveFileId: fileId }));
+      }
+    } catch { /* index already carries it */ }
+  };
+
+  const syncDocToDrive = useCallback(async (id, html) => {
+    if (!isDriveConnected()) return;
+    setDriveStatus("syncing");
+    try {
+      const meta = latestLib.current.docs.find((d) => d.id === id);
+      const folder = latestLib.current.folders.find((f) => f.id === meta?.folderId);
+      const parentId = await resolveDriveFolder(meta?.folderId ?? null, folder);
+      const name = firstLineTitle(html) || "Untitled";
+      const fileId = await pushDocToDrive({ driveFileId: meta?.driveFileId || null, name, html, parentId });
+      if (!meta?.driveFileId) await attachDriveFileId(id, fileId);
+      if (latest.current.id === id) setActiveDriveFileId(fileId);
+      setDriveStatus("connected");
+    } catch (e) {
+      setDriveStatus("error");
+      setDriveError(e.message || String(e));
+    }
+  }, []);
+
+  const scheduleDriveSync = (id, html) => {
+    if (!isDriveConnected()) return;
+    clearTimeout(driveSyncTimer.current);
+    driveSyncTimer.current = setTimeout(() => syncDocToDrive(id, html), 2000);
+  };
+
+  const handleConnectDrive = async () => {
+    setDriveStatus("connecting");
+    setDriveError("");
+    try {
+      await connectDrive();
+      setDriveStatus("connected");
+      if (activeId) scheduleDriveSync(activeId, latest.current.html);
+    } catch (e) {
+      setDriveStatus("error");
+      setDriveError(e.message || String(e));
+    }
+  };
+
+  const handleDisconnectDrive = () => {
+    clearTimeout(driveSyncTimer.current);
+    disconnectDrive();
+    setDriveStatus("disconnected");
+    setDriveError("");
   };
 
   /* ——— caret geometry (contentEditable gives it to us directly) ——— */
@@ -424,6 +507,7 @@ export default function SampleTyper() {
     setTitle("Untitled");
     setMode("prose");
     setIsEmpty(true);
+    setActiveDriveFileId(null);
     prevWordCount.current = 0;
     prevLen.current = 0;
     setDocNonce((n) => n + 1);
@@ -435,18 +519,21 @@ export default function SampleTyper() {
 
   const deleteDoc = async (id) => {
     setConfirmDelete(null);
+    const doc = docs.find((d) => d.id === id);
     const nextDocs = docs.filter((d) => d.id !== id);
     await persistLib({ folders, docs: nextDocs });
     try { await window.storage.delete(`writer:doc:${id}`); } catch { /* reconciled later */ }
+    if (isDriveConnected() && doc?.driveFileId) trashDriveFile(doc.driveFileId);
     if (id === activeId) {
       const next = [...nextDocs].sort(byRecent)[0];
       if (next) openDoc(next.id);
-      else { setActiveId(null); setBodyHtml(""); setTitle(""); }
+      else { setActiveId(null); setBodyHtml(""); setTitle(""); setActiveDriveFileId(null); }
     }
   };
 
   const moveDoc = async (docId, folderId) => {
     setMoveMenuFor(null);
+    const doc = docs.find((d) => d.id === docId);
     const nextDocs = docs.map((d) => (d.id === docId ? { ...d, folderId } : d));
     const nextFolders = folderId
       ? folders.map((f) => (f.id === folderId ? { ...f, collapsed: false } : f))
@@ -457,10 +544,19 @@ export default function SampleTyper() {
     try {
       const res = await window.storage.get(`writer:doc:${docId}`);
       if (res) {
-        const doc = JSON.parse(res.value);
-        await window.storage.set(`writer:doc:${docId}`, JSON.stringify({ ...doc, folderId }));
+        const d = JSON.parse(res.value);
+        await window.storage.set(`writer:doc:${docId}`, JSON.stringify({ ...d, folderId }));
       }
     } catch { /* index already carries the move */ }
+    if (isDriveConnected() && doc?.driveFileId) {
+      try {
+        const oldFolder = folders.find((f) => f.id === doc.folderId);
+        const newFolder = folders.find((f) => f.id === folderId);
+        const newParent = await resolveDriveFolder(folderId, newFolder);
+        const oldParent = oldFolder?.driveFolderId || (await ensureRootFolder());
+        await moveDriveFile(doc.driveFileId, newParent, oldParent);
+      } catch { /* best-effort — content sync will still find it */ }
+    }
   };
 
   /* ——— folder actions ——— */
@@ -478,12 +574,23 @@ export default function SampleTyper() {
     const name = renameValue.trim();
     setRenamingFolder(null);
     if (!name) return;
+    const folder = folders.find((f) => f.id === id);
     await persistLib({ folders: folders.map((f) => (f.id === id ? { ...f, name } : f)), docs });
+    if (isDriveConnected() && folder?.driveFolderId) renameDriveFile(folder.driveFolderId, name).catch(() => {});
   };
   const dissolveFolder = async (id) => {
     setConfirmDissolve(null);
+    const folder = folders.find((f) => f.id === id);
+    const affected = docs.filter((d) => d.folderId === id && d.driveFileId);
     const nextDocs = docs.map((d) => (d.folderId === id ? { ...d, folderId: null } : d));
     await persistLib({ folders: folders.filter((f) => f.id !== id), docs: nextDocs });
+    if (isDriveConnected() && folder?.driveFolderId) {
+      try {
+        const rootId = await ensureRootFolder();
+        for (const d of affected) await moveDriveFile(d.driveFileId, rootId, folder.driveFolderId);
+        await trashDriveFile(folder.driveFolderId);
+      } catch { /* best-effort */ }
+    }
   };
 
   /* ——— prefs / goal ——— */
@@ -944,9 +1051,41 @@ export default function SampleTyper() {
         </div>
 
         <div style={{ padding: "10px 14px", borderTop: `1px solid ${T.edgeSoft}`, minWidth: 264 }}>
+
+          {driveConfigured() ? (
+            <div style={{ marginBottom: 9 }}>
+              {driveStatus === "connected" || driveStatus === "syncing" ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: T.inkDim }}>
+                    <span
+                      className={driveStatus === "syncing" ? "ink-dot-busy" : ""}
+                      style={{ width: 6, height: 6, borderRadius: "50%", background: driveStatus === "syncing" ? T.warn : T.good }} />
+                    {driveStatus === "syncing" ? "Syncing to Drive…" : "Synced to Google Drive"}
+                  </span>
+                  <button className="st-ghost" onClick={handleDisconnectDrive} style={{ fontSize: 10.5 }}>
+                    disconnect
+                  </button>
+                </div>
+              ) : (
+                <button className="st-ghost" onClick={handleConnectDrive} disabled={driveStatus === "connecting"}
+                  title="Sign in with Google — drafts sync live as native Google Docs, scoped to files this app creates"
+                  style={{ width: "100%", border: `1px solid ${T.edgeSoft}` }}>
+                  {driveStatus === "connecting" ? "Connecting…" : driveStatus === "error" ? "Retry Google Drive connection" : "Connect Google Drive"}
+                </button>
+              )}
+              {driveStatus === "error" && driveError && (
+                <div style={{ fontSize: 10, color: T.accent, marginTop: 4, lineHeight: 1.4 }}>{driveError}</div>
+              )}
+            </div>
+          ) : (
+            <div style={{ fontSize: 10.5, color: T.inkFaint, fontStyle: "italic", marginBottom: 9, lineHeight: 1.5 }}>
+              Drive sync needs a Google Client ID — see DRIVE_SETUP.md.
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 4, marginBottom: 7 }}>
             <button className="st-ghost" onClick={backupAll} disabled={backupBusy}
-              title="Download the whole library as one .json — drop it in your Google Drive folder"
+              title="Download the whole library as one .json — a portable local snapshot"
               style={{ flex: 1, border: `1px solid ${T.edgeSoft}` }}>
               {backupBusy ? "Working…" : "Backup all"}
             </button>
@@ -960,7 +1099,7 @@ export default function SampleTyper() {
           </div>
           <div style={{ fontSize: 10.5, color: T.inkFaint, lineHeight: 1.5 }}>
             Autosaves to your Claude account as you type.
-            {lastBackupAt ? ` Last backup ${timeAgo(lastBackupAt)}.` : " No Drive backup yet — one click above."}
+            {lastBackupAt ? ` Last manual backup ${timeAgo(lastBackupAt)}.` : " No manual backup yet."}
           </div>
         </div>
       </aside>
@@ -1052,6 +1191,16 @@ export default function SampleTyper() {
                 style={{ border: `1px solid ${T.edgeSoft}` }}>
                 Export
               </button>
+
+              {activeDriveFileId && (
+                <a href={`https://docs.google.com/document/d/${activeDriveFileId}/edit`}
+                  target="_blank" rel="noreferrer"
+                  className="st-ghost"
+                  title="Open this draft in Google Docs"
+                  style={{ border: `1px solid ${T.edgeSoft}`, textDecoration: "none", display: "inline-flex", alignItems: "center" }}>
+                  Docs ↗
+                </a>
+              )}
 
               <span title="Autosave status" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: T.inkDim, minWidth: 88, justifyContent: "flex-end", flexShrink: 0 }}>
                 <span
