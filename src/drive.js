@@ -216,8 +216,8 @@ export async function pushDocToDrive({ driveFileId, name, html, parentId }) {
     `--${boundary}--`;
 
   const url = driveFileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=multipart`
-    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
+    ? `https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=multipart&fields=id,modifiedTime`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime`;
 
   const res = await fetch(url, {
     method: driveFileId ? "PATCH" : "POST",
@@ -229,7 +229,10 @@ export async function pushDocToDrive({ driveFileId, name, html, parentId }) {
   });
   if (!res.ok) throw new Error(`Drive upload ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const json = await res.json();
-  return json.id;
+  /* modifiedTime is Drive's own server clock — callers use it as the
+     sync checkpoint instead of the local clock, so the two never need
+     to be compared against each other directly. */
+  return { id: json.id, modifiedTime: json.modifiedTime };
 }
 
 /* Everything directly inside a folder — used to rebuild the local library

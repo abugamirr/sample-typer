@@ -341,14 +341,24 @@ export default function SampleTyper() {
     return driveFolderId;
   };
 
-  const attachDriveFileId = async (id, fileId) => {
-    const nextDocs = latestLib.current.docs.map((d) => (d.id === id ? { ...d, driveFileId: fileId } : d));
+  /* Stamps the sync checkpoint after a push actually succeeds: the local
+     updatedAt this push corresponds to, and Drive's own modifiedTime for
+     that same write. Each is only ever compared against its own clock's
+     prior value later, so local/Drive clock skew can't cause a false
+     "changed" reading. */
+  const markDriveSynced = async (id, localUpdatedAt, driveModifiedAt, fileId) => {
+    const nextDocs = latestLib.current.docs.map((d) =>
+      d.id === id ? { ...d, driveFileId: fileId, syncedLocalUpdatedAt: localUpdatedAt, syncedDriveModifiedAt: driveModifiedAt } : d
+    );
+    latestLib.current = { folders: latestLib.current.folders, docs: nextDocs };
     await persistLib({ folders: latestLib.current.folders, docs: nextDocs });
     try {
       const res = await window.storage.get(`writer:doc:${id}`);
       if (res) {
         const doc = JSON.parse(res.value);
-        await window.storage.set(`writer:doc:${id}`, JSON.stringify({ ...doc, driveFileId: fileId }));
+        await window.storage.set(`writer:doc:${id}`, JSON.stringify({
+          ...doc, driveFileId: fileId, syncedLocalUpdatedAt: localUpdatedAt, syncedDriveModifiedAt: driveModifiedAt,
+        }));
       }
     } catch { /* index already carries it */ }
   };
@@ -358,11 +368,12 @@ export default function SampleTyper() {
     setDriveStatus("syncing");
     try {
       const meta = latestLib.current.docs.find((d) => d.id === id);
+      const localUpdatedAt = meta?.updatedAt ?? Date.now(); // the local state this push represents
       const folder = latestLib.current.folders.find((f) => f.id === meta?.folderId);
       const parentId = await resolveDriveFolder(meta?.folderId ?? null, folder);
       const name = firstLineTitle(html) || "Untitled";
-      const fileId = await pushDocToDrive({ driveFileId: meta?.driveFileId || null, name, html, parentId });
-      if (!meta?.driveFileId) await attachDriveFileId(id, fileId);
+      const { id: fileId, modifiedTime } = await pushDocToDrive({ driveFileId: meta?.driveFileId || null, name, html, parentId });
+      await markDriveSynced(id, localUpdatedAt, new Date(modifiedTime).getTime(), fileId);
       if (latest.current.id === id) setActiveDriveFileId(fileId);
       setDriveStatus("connected");
     } catch (e) {
@@ -377,10 +388,32 @@ export default function SampleTyper() {
     driveSyncTimer.current = setTimeout(() => syncDocToDrive(id, html), 2000);
   };
 
+  /* A tab hidden or closed mid-debounce leaves Drive stale until the next
+     reconnect — flush the pending push immediately instead of waiting out
+     the 2s window. */
+  useEffect(() => {
+    const flushPendingDriveSync = () => {
+      if (!driveSyncTimer.current || !isDriveConnected()) return;
+      clearTimeout(driveSyncTimer.current);
+      driveSyncTimer.current = null;
+      const { id, html } = latest.current;
+      if (id) syncDocToDrive(id, html);
+    };
+    const onVisibilityChange = () => { if (document.hidden) flushPendingDriveSync(); };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("pagehide", flushPendingDriveSync);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("pagehide", flushPendingDriveSync);
+    };
+  }, [syncDocToDrive]);
+
   /* Pull the library back from Drive — reconciles folders and docs that
-     exist there but not locally (a new device, a cleared browser), and
-     refreshes any local doc Drive holds a newer copy of. Newest wins,
-     mirroring the JSON Restore merge logic. */
+     exist there but not locally (a new device, a cleared browser), pulls
+     any doc Drive holds a genuinely newer copy of, pushes any doc that
+     only changed locally, and — if both sides changed since the last
+     confirmed sync — never silently picks a winner: Drive's copy is
+     pulled in and the diverged local copy is kept as a separate doc. */
   const syncFromDrive = async () => {
     if (!isDriveConnected()) return;
     setDriveStatus("syncing");
@@ -410,12 +443,41 @@ export default function SampleTyper() {
       let nextDocs = [...latestLib.current.docs];
       const docIdByDriveId = new Map(nextDocs.filter((d) => d.driveFileId).map((d) => [d.driveFileId, d.id]));
       let refreshedActive = false;
+      const toPush = []; // docs that only changed locally — pushed after reconciliation, never overwritten here
 
       for (const dd of allDriveDocs) {
         const driveModified = new Date(dd.modifiedTime).getTime();
         const localId = docIdByDriveId.get(dd.id);
         const localMeta = localId ? nextDocs.find((d) => d.id === localId) : null;
-        if (localMeta && driveModified <= (localMeta.updatedAt || 0)) continue; // local is newer or same — keep it
+
+        if (localMeta) {
+          const localDirty = (localMeta.updatedAt || 0) > (localMeta.syncedLocalUpdatedAt || 0);
+          const driveDirty = driveModified > (localMeta.syncedDriveModifiedAt || 0);
+
+          if (!localDirty && !driveDirty) continue; // both sides already agree — nothing to do
+          if (localDirty && !driveDirty) { toPush.push(localId); continue; } // only we changed — push, don't touch Drive's content
+
+          if (localDirty && driveDirty) {
+            // real conflict — save the diverged local copy before pulling Drive's version over this slot
+            try {
+              const res = await window.storage.get(`writer:doc:${localId}`);
+              if (res) {
+                const staleDoc = JSON.parse(res.value);
+                const recoveredId = uid();
+                const recoveredTitle = `${staleDoc.title || "Untitled"} (recovered local copy)`;
+                await window.storage.set(`writer:doc:${recoveredId}`, JSON.stringify({
+                  ...staleDoc, id: recoveredId, title: recoveredTitle, driveFileId: null,
+                  syncedLocalUpdatedAt: undefined, syncedDriveModifiedAt: undefined,
+                }));
+                nextDocs.push({
+                  id: recoveredId, title: recoveredTitle, updatedAt: staleDoc.updatedAt,
+                  words: countWordsHtml(staleDoc.body), folderId: staleDoc.folderId ?? null, driveFileId: null,
+                });
+              }
+            } catch { /* best effort — worst case the conflict is only visible via Drive's own version history */ }
+          }
+          // else: !localDirty && driveDirty — the plain "Drive has a newer copy" case, fall through to pull
+        }
 
         const html = await exportDriveDocHtml(dd.id);
         let mode = "prose";
@@ -426,16 +488,30 @@ export default function SampleTyper() {
           } catch { /* default to prose */ }
         }
         const id = localId || uid();
-        const entry = { id, title: dd.name, updatedAt: driveModified, words: countWordsHtml(html), folderId: dd.localFolderId, driveFileId: dd.id };
+        const entry = {
+          id, title: dd.name, updatedAt: driveModified, words: countWordsHtml(html), folderId: dd.localFolderId,
+          driveFileId: dd.id, syncedLocalUpdatedAt: driveModified, syncedDriveModifiedAt: driveModified,
+        };
         nextDocs = localId ? nextDocs.map((d) => (d.id === id ? entry : d)) : [entry, ...nextDocs];
-        await window.storage.set(`writer:doc:${id}`, JSON.stringify({ id, title: dd.name, body: html, format: "html", mode, folderId: dd.localFolderId, updatedAt: driveModified, driveFileId: dd.id }));
+        await window.storage.set(`writer:doc:${id}`, JSON.stringify({
+          id, title: dd.name, body: html, format: "html", mode, folderId: dd.localFolderId, updatedAt: driveModified,
+          driveFileId: dd.id, syncedLocalUpdatedAt: driveModified, syncedDriveModifiedAt: driveModified,
+        }));
         if (id === activeId) refreshedActive = true;
       }
 
+      latestLib.current = { folders: nextFolders, docs: nextDocs }; // ahead of the render — the push pass below reads this
       await persistLib({ folders: nextFolders, docs: nextDocs });
       if (refreshedActive) await openDoc(activeId);
       else if (!activeId && nextDocs.length) await openDoc([...nextDocs].sort(byRecent)[0].id);
       setDriveStatus("connected");
+
+      for (const id of toPush) {
+        const html = id === activeId
+          ? latest.current.html
+          : await window.storage.get(`writer:doc:${id}`).then((r) => (r ? JSON.parse(r.value).body : null));
+        if (html != null) await syncDocToDrive(id, html);
+      }
     } catch (e) {
       setDriveStatus("error");
       setDriveError(e.message || String(e));
@@ -448,7 +524,6 @@ export default function SampleTyper() {
     try {
       await connectDrive();
       await syncFromDrive();
-      if (activeId) scheduleDriveSync(activeId, latest.current.html);
     } catch (e) {
       setDriveStatus("error");
       setDriveError(e.message || String(e));
