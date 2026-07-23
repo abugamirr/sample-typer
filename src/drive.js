@@ -21,13 +21,34 @@ let accessToken = null;
 let tokenExpiresAt = 0;
 let rootFolderId = null;
 let gisReady = null;
+let tokenRefreshTimer = null;
 
 export const driveConfigured = () => Boolean(CLIENT_ID);
 export const isDriveConnected = () => Boolean(accessToken) && Date.now() < tokenExpiresAt;
 
+function clearTokenRefreshTimer() {
+  if (tokenRefreshTimer) clearTimeout(tokenRefreshTimer);
+  tokenRefreshTimer = null;
+}
+
+function scheduleTokenRefresh() {
+  clearTokenRefreshTimer();
+  if (!accessToken || !tokenExpiresAt) return;
+  const refreshIn = Math.max(tokenExpiresAt - Date.now() - 5 * 60 * 1000, 30 * 1000);
+  tokenRefreshTimer = setTimeout(async () => {
+    try {
+      await ensureTokenClient();
+      await requestToken("");
+    } catch {
+      /* let the next explicit Drive action retry */
+    }
+  }, refreshIn);
+}
+
 function saveTokenToStorage() {
   try { localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ accessToken, tokenExpiresAt })); } catch { /* storage unavailable */ }
 }
+
 function clearStoredToken() {
   try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch { /* ignore */ }
 }
@@ -45,6 +66,7 @@ export function restoreStoredToken() {
     if (!at || !exp || Date.now() >= exp) { clearStoredToken(); return false; }
     accessToken = at;
     tokenExpiresAt = exp;
+    scheduleTokenRefresh();
     return true;
   } catch {
     return false;
@@ -72,6 +94,7 @@ function requestToken(prompt) {
       accessToken = resp.access_token;
       tokenExpiresAt = Date.now() + (resp.expires_in - 60) * 1000;
       saveTokenToStorage();
+      scheduleTokenRefresh();
       resolve(accessToken);
     };
     tokenClient.requestAccessToken({ prompt });
@@ -104,15 +127,24 @@ export async function trySilentConnect() {
   if (!CLIENT_ID) return false;
   try {
     await ensureTokenClient();
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("silent connect timed out")), 6000));
-    await Promise.race([requestToken(""), timeout]);
-    return true;
+    for (const delay of [0, 1200, 2500]) {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      try {
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("silent connect timed out")), 6000));
+        await Promise.race([requestToken(""), timeout]);
+        return true;
+      } catch {
+        /* try again once more in case Google Identity Services is still settling */
+      }
+    }
+    return false;
   } catch {
     return false;
   }
 }
 
 export function disconnectDrive() {
+  clearTokenRefreshTimer();
   if (accessToken && window.google?.accounts?.oauth2?.revoke) {
     window.google.accounts.oauth2.revoke(accessToken, () => {});
   }

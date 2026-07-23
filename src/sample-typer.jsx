@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 
 /* ————————————————————————————————————————————————————————
    SAMPLE TYPER v5 — a quiet writing room for scripts & prose
@@ -130,10 +130,97 @@ export default function SampleTyper() {
   const bloomRef = useRef(null);
   const progScroll = useRef(false);   // ignore our own smooth scrolls
   const prefsRef = useRef({});
-  latest.current = { id: activeId, html: bodyHtml };
-  latestLib.current = { folders, docs };
+
+  useEffect(() => {
+    latest.current = { id: activeId, html: bodyHtml };
+    latestLib.current = { folders, docs };
+  }, [activeId, bodyHtml, folders, docs]);
 
   /* ——— load library, migrating older formats ——— */
+  function persistLib(lib) {
+    setFolders(lib.folders);
+    setDocs(lib.docs);
+    return window.storage.set("writer:index", JSON.stringify(lib)).then(
+      () => true,
+      () => {
+        setStatus("offline");
+        clearTimeout(retryTimer.current);
+        retryTimer.current = setTimeout(() => persistLib(latestLib.current), 4000);
+        return false;
+      }
+    );
+  }
+
+  function openDoc(id) {
+    setMoveMenuFor(null);
+    return window.storage.get(`writer:doc:${id}`).then((res) => {
+      const doc = res ? JSON.parse(res.value) : null;
+      if (doc) {
+        let html;
+        if (looksLikeHtml(doc.body)) {
+          html = doc.body || "";
+        } else {
+          /* migrate plain text: the old separate title becomes line one */
+          const t = doc.title && doc.title !== "Untitled" ? doc.title + "\n" : "";
+          html = textToHtml(t + (doc.body || ""));
+        }
+        /* heal drafts saved before the wrap fix: non-breaking spaces the
+           browser left behind become ordinary, wrappable spaces */
+        html = html.replace(/&nbsp;/g, " ").replace(/\u00A0/g, " ");
+        initialHtml.current = html;
+        setActiveId(doc.id);
+        setBodyHtml(html);
+        setTitle(firstLineTitle(html));
+        setMode(doc.mode || "prose");
+        setStatus("saved");
+        const text = htmlToText(html);
+        prevWordCount.current = countWordsText(text);
+        prevLen.current = text.length;
+        setIsEmpty(!text.trim());
+        setReviewing(false);
+        setDocNonce((n) => n + 1);
+        return;
+      }
+      const meta = latestLib.current.docs.find((d) => d.id === id);
+      if (meta) {
+        initialHtml.current = "";
+        setActiveId(id);
+        setBodyHtml("");
+        setTitle(meta.title);
+        setStatus("offline");
+        prevWordCount.current = 0;
+        prevLen.current = 0;
+        setIsEmpty(true);
+        setDocNonce((n) => n + 1);
+      }
+    });
+  }
+
+  /* ——— the save engine ——— */
+  function persist(id, html, m) {
+    const now = Date.now();
+    setStatus("saving");
+    const meta = latestLib.current.docs.find((d) => d.id === id);
+    const t = firstLineTitle(html);
+    const doc = { id, title: t, body: html, format: "html", mode: m, folderId: meta?.folderId ?? null, updatedAt: now };
+    window.storage.set(`writer:doc:${id}`, JSON.stringify(doc)).then(async () => {
+      const nextDocs = [
+        { id, title: t, updatedAt: now, words: countWordsHtml(html), folderId: meta?.folderId ?? null },
+        ...latestLib.current.docs.filter((d) => d.id !== id),
+      ];
+      const ok = await persistLib({ folders: latestLib.current.folders, docs: nextDocs });
+      if (!ok) return;
+      if (latest.current.id === id && latest.current.html === html) setStatus("saved");
+    }).catch(() => {
+      setStatus("offline");
+      clearTimeout(retryTimer.current);
+      retryTimer.current = setTimeout(() => {
+        const { id: ci, html: ch } = latest.current;
+        if (ci) persist(ci, ch, m);
+      }, 4000);
+    });
+  }
+
   useEffect(() => {
     (async () => {
       try {
@@ -163,92 +250,6 @@ export default function SampleTyper() {
       clearTimeout(retryTimer.current);
     };
   }, []);
-
-  const persistLib = useCallback(async (lib) => {
-    setFolders(lib.folders);
-    setDocs(lib.docs);
-    try {
-      await window.storage.set("writer:index", JSON.stringify(lib));
-      return true;
-    } catch {
-      setStatus("offline");
-      clearTimeout(retryTimer.current);
-      retryTimer.current = setTimeout(() => persistLib(latestLib.current), 4000);
-      return false;
-    }
-  }, []);
-
-  const openDoc = async (id) => {
-    setMoveMenuFor(null);
-    try {
-      const res = await window.storage.get(`writer:doc:${id}`);
-      const doc = res ? JSON.parse(res.value) : null;
-      if (doc) {
-        let html;
-        if (looksLikeHtml(doc.body)) {
-          html = doc.body || "";
-        } else {
-          /* migrate plain text: the old separate title becomes line one */
-          const t = doc.title && doc.title !== "Untitled" ? doc.title + "\n" : "";
-          html = textToHtml(t + (doc.body || ""));
-        }
-        /* heal drafts saved before the wrap fix: non-breaking spaces the
-           browser left behind become ordinary, wrappable spaces */
-        html = html.replace(/&nbsp;/g, " ").replace(/\u00A0/g, " ");
-        initialHtml.current = html;
-        setActiveId(doc.id);
-        setBodyHtml(html);
-        setTitle(firstLineTitle(html));
-        setMode(doc.mode || "prose");
-        setStatus("saved");
-        const text = htmlToText(html);
-        prevWordCount.current = countWordsText(text);
-        prevLen.current = text.length;
-        setIsEmpty(!text.trim());
-        setReviewing(false);
-        setDocNonce((n) => n + 1);
-      }
-    } catch {
-      const meta = latestLib.current.docs.find((d) => d.id === id);
-      if (meta) {
-        initialHtml.current = "";
-        setActiveId(id);
-        setBodyHtml("");
-        setTitle(meta.title);
-        setStatus("offline");
-        prevWordCount.current = 0;
-        prevLen.current = 0;
-        setIsEmpty(true);
-        setDocNonce((n) => n + 1);
-      }
-    }
-  };
-
-  /* ——— the save engine ——— */
-  const persist = useCallback(async (id, html, m) => {
-    const now = Date.now();
-    setStatus("saving");
-    try {
-      const meta = latestLib.current.docs.find((d) => d.id === id);
-      const t = firstLineTitle(html);
-      const doc = { id, title: t, body: html, format: "html", mode: m, folderId: meta?.folderId ?? null, updatedAt: now };
-      await window.storage.set(`writer:doc:${id}`, JSON.stringify(doc));
-      const nextDocs = [
-        { id, title: t, updatedAt: now, words: countWordsHtml(html), folderId: meta?.folderId ?? null },
-        ...latestLib.current.docs.filter((d) => d.id !== id),
-      ];
-      const ok = await persistLib({ folders: latestLib.current.folders, docs: nextDocs });
-      if (!ok) return;
-      if (latest.current.id === id && latest.current.html === html) setStatus("saved");
-    } catch {
-      setStatus("offline");
-      clearTimeout(retryTimer.current);
-      retryTimer.current = setTimeout(() => {
-        const { id: ci, html: ch } = latest.current;
-        if (ci) persist(ci, ch, m);
-      }, 4000);
-    }
-  }, [persistLib]);
 
   const scheduleSave = (html, m) => {
     setStatus("dirty");
@@ -414,6 +415,28 @@ export default function SampleTyper() {
   const onUserScrollIntent = () => { if (focus) setReviewing(true); };
   const onScroll = () => { if (focus && !progScroll.current) setReviewing(true); };
 
+  const toggleFocus = () => {
+    setFocus((current) => {
+      const next = !current;
+      if (next) {
+        setSidebarOpen(false);
+        setReviewing(false);
+      }
+      return next;
+    });
+  };
+
+  const toggleFocus = () => {
+    setFocus((current) => {
+      const next = !current;
+      if (next) {
+        setSidebarOpen(false);
+        setReviewing(false);
+      }
+      return next;
+    });
+  };
+
   /* ——— draft actions ——— */
   const newDoc = async (folderId = null) => {
     const id = uid();
@@ -558,14 +581,12 @@ export default function SampleTyper() {
   useEffect(() => {
     const onKey = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(); }
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f") { e.preventDefault(); setFocus((f) => !f); }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "f") { e.preventDefault(); toggleFocus(); }
       if (e.key === "Escape" && focus) setFocus(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
-
-  useEffect(() => { if (focus) { setSidebarOpen(false); setReviewing(false); } }, [focus]);
 
   /* ——— drag & drop zone helpers ——— */
   const dropZoneStyle = (zoneId) => ({
@@ -1027,7 +1048,7 @@ export default function SampleTyper() {
                 ))}
               </div>
 
-              <button className="st-ghost" onClick={() => setFocus((f) => !f)}
+              <button className="st-ghost" onClick={toggleFocus}
                 title="Focus mode — everything but the page fades away (⌘⇧F, Esc to exit)"
                 style={{
                   border: `1px solid ${focus ? T.accent : T.edgeSoft}`,

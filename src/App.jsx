@@ -163,11 +163,13 @@ export default function SampleTyper() {
   const [driveError, setDriveError] = useState("");
   const [activeDriveFileId, setActiveDriveFileId] = useState(null);
   const driveSyncTimer = useRef(null);
+  const driveReconnectInFlight = useRef(false);
 
   const saveTimer = useRef(null);
   const retryTimer = useRef(null);
   const latest = useRef({ id: null, html: "" });
   const latestLib = useRef({ folders: [], docs: [] });
+  const activeIdRef = useRef(null);
   const prevWordCount = useRef(0);
   const prevLen = useRef(0);
   const initialHtml = useRef("");     // what the editor mounts with, per doc
@@ -178,6 +180,7 @@ export default function SampleTyper() {
   const prefsRef = useRef({});
   latest.current = { id: activeId, html: bodyHtml };
   latestLib.current = { folders, docs };
+  activeIdRef.current = activeId;
   const T = THEMES[theme];
 
   /* ——— load library, migrating older formats ——— */
@@ -206,24 +209,53 @@ export default function SampleTyper() {
         }
       } catch { /* no prefs yet */ }
       setLoading(false);
-
-      /* try to pick the Drive connection back up without making the user
-         click "Connect" again every single reload */
-      if (driveConfigured()) {
-        if (restoreStoredToken()) {
-          setDriveStatus("connected");
-          await syncFromDrive();
-        } else {
-          setDriveStatus("connecting");
-          const ok = await trySilentConnect();
-          if (ok) { setDriveStatus("connected"); await syncFromDrive(); }
-          else setDriveStatus("disconnected");
-        }
-      }
     })();
     return () => {
       clearTimeout(saveTimer.current);
       clearTimeout(retryTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!driveConfigured()) return;
+    let cancelled = false;
+    const kickReconnect = async () => {
+      if (cancelled || isDriveConnected() || driveReconnectInFlight.current) return;
+      driveReconnectInFlight.current = true;
+      try {
+        if (restoreStoredToken()) {
+          setDriveStatus("connected");
+          await syncFromDrive();
+          return;
+        }
+
+        setDriveStatus("connecting");
+        const ok = await trySilentConnect();
+        if (ok) {
+          setDriveStatus("connected");
+          await syncFromDrive();
+          return;
+        }
+
+        setDriveStatus("disconnected");
+      } finally {
+        driveReconnectInFlight.current = false;
+      }
+    };
+
+    const retry = setTimeout(kickReconnect, 1500);
+    kickReconnect();
+
+    const onFocus = () => { if (!document.hidden) kickReconnect(); };
+    const onVisibilityChange = () => { if (!document.hidden) kickReconnect(); };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      cancelled = true;
+      clearTimeout(retry);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
 
@@ -418,6 +450,7 @@ export default function SampleTyper() {
     if (!isDriveConnected()) return;
     setDriveStatus("syncing");
     try {
+      const currentActiveId = activeIdRef.current;
       const rootId = await ensureRootFolder();
       const rootChildren = await listDriveChildren(rootId);
       const driveFolders = rootChildren.filter((f) => f.mimeType === "application/vnd.google-apps.folder");
@@ -497,13 +530,13 @@ export default function SampleTyper() {
           id, title: dd.name, body: html, format: "html", mode, folderId: dd.localFolderId, updatedAt: driveModified,
           driveFileId: dd.id, syncedLocalUpdatedAt: driveModified, syncedDriveModifiedAt: driveModified,
         }));
-        if (id === activeId) refreshedActive = true;
+        if (id === currentActiveId) refreshedActive = true;
       }
 
       latestLib.current = { folders: nextFolders, docs: nextDocs }; // ahead of the render — the push pass below reads this
       await persistLib({ folders: nextFolders, docs: nextDocs });
-      if (refreshedActive) await openDoc(activeId);
-      else if (!activeId && nextDocs.length) await openDoc([...nextDocs].sort(byRecent)[0].id);
+      if (refreshedActive) await openDoc(currentActiveId);
+      else if (!currentActiveId && nextDocs.length) await openDoc([...nextDocs].sort(byRecent)[0].id);
       setDriveStatus("connected");
 
       for (const id of toPush) {
