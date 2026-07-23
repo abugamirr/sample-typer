@@ -300,20 +300,40 @@ function sanitizeInlineFragment(node) {
 const escapeHtmlEntities = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /* Walk Docs' block structure (<p>, headings, list items, wrapper <div>s)
-   and flatten it into one plain <div> per line — the exact shape the
-   editor itself produces, so nothing here fights the app's own styling. */
+   and flatten it into one plain <div> per saved line. Docs often exports
+   a whole logical paragraph as one block with embedded <br> nodes, so we
+   split on those breaks to preserve the original draft layout. */
 function sanitizeImportedHtml(bodyEl) {
   const lines = [];
+  const pushLine = (line) => {
+    lines.push(line);
+  };
+  const flushFragment = (fragment) => {
+    const pieces = fragment.split(/<br\s*\/?>/i);
+    for (const piece of pieces) pushLine(piece.trim());
+  };
   const walk = (root) => {
-    for (const child of root.children) {
-      if (BLOCK_TAGS.has(child.tagName.toLowerCase())) {
-        lines.push(sanitizeInlineFragment(child).trim());
-      } else {
-        walk(child);
+    for (const child of root.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const text = child.textContent?.trim();
+        if (text) pushLine(escapeHtmlEntities(text));
+        continue;
       }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      const tag = child.tagName.toLowerCase();
+      if (tag === "br") {
+        pushLine("");
+        continue;
+      }
+      if (BLOCK_TAGS.has(tag)) {
+        flushFragment(sanitizeInlineFragment(child));
+        continue;
+      }
+      walk(child);
     }
   };
   walk(bodyEl);
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
   if (!lines.length) return "<div><br></div>";
   return lines.map((l) => `<div>${l || "<br>"}</div>`).join("");
 }

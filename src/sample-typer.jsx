@@ -426,17 +426,6 @@ export default function SampleTyper() {
     });
   };
 
-  const toggleFocus = () => {
-    setFocus((current) => {
-      const next = !current;
-      if (next) {
-        setSidebarOpen(false);
-        setReviewing(false);
-      }
-      return next;
-    });
-  };
-
   /* ——— draft actions ——— */
   const newDoc = async (folderId = null) => {
     const id = uid();
