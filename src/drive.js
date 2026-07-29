@@ -24,6 +24,7 @@ let gisReady = null;
 let tokenRefreshTimer = null;
 let authInFlight = false;
 let hasAttemptedSilentConnect = false;
+let rememberedAuthState = null;
 
 export const driveConfigured = () => Boolean(CLIENT_ID);
 export const isDriveConnected = () => Boolean(accessToken) && Date.now() < tokenExpiresAt;
@@ -48,10 +49,15 @@ function scheduleTokenRefresh() {
 }
 
 function saveTokenToStorage() {
-  try { localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ accessToken, tokenExpiresAt })); } catch { /* storage unavailable */ }
+  try {
+    const payload = { accessToken, tokenExpiresAt, timestamp: Date.now() };
+    rememberedAuthState = payload;
+    localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(payload));
+  } catch { /* storage unavailable */ }
 }
 
 function clearStoredToken() {
+  rememberedAuthState = null;
   try { localStorage.removeItem(TOKEN_STORAGE_KEY); } catch { /* ignore */ }
 }
 
@@ -64,8 +70,9 @@ export function restoreStoredToken() {
   try {
     const raw = localStorage.getItem(TOKEN_STORAGE_KEY);
     if (!raw) return false;
-    const { accessToken: at, tokenExpiresAt: exp } = JSON.parse(raw);
+    const { accessToken: at, tokenExpiresAt: exp, timestamp } = JSON.parse(raw);
     if (!at || !exp || Date.now() >= exp) { clearStoredToken(); return false; }
+    rememberedAuthState = { accessToken: at, tokenExpiresAt: exp, timestamp: timestamp || Date.now() };
     accessToken = at;
     tokenExpiresAt = exp;
     scheduleTokenRefresh();
@@ -122,12 +129,15 @@ export async function connectDrive() {
   return requestToken("consent");
 }
 
-/* Called on page load: if this browser already granted consent and still
-   has an active Google session, Google can issue a fresh token without
-   showing a consent prompt. We only try it once per session so it doesn't
-   keep re-triggering the auth flow when the app regains focus. */
+/* Called on page load: if we already saved a working token from an earlier
+   sign-in, reuse it silently. We avoid forcing a fresh approval prompt on
+   every launch because that is what makes the app feel like it is always
+   re-authorizing instead of staying logged in. */
 export async function trySilentConnect() {
-  if (!CLIENT_ID || hasAttemptedSilentConnect || authInFlight) return false;
+  if (!CLIENT_ID || authInFlight) return false;
+  if (isDriveConnected()) return true;
+  const restored = restoreStoredToken();
+  if (!restored) return false;
   authInFlight = true;
   try {
     await ensureTokenClient();
@@ -135,6 +145,9 @@ export async function trySilentConnect() {
     hasAttemptedSilentConnect = Boolean(token);
     return Boolean(token);
   } catch {
+    clearStoredToken();
+    accessToken = null;
+    tokenExpiresAt = 0;
     hasAttemptedSilentConnect = true;
     return false;
   } finally {
@@ -151,12 +164,14 @@ export function disconnectDrive() {
   tokenExpiresAt = 0;
   rootFolderId = null;
   hasAttemptedSilentConnect = false;
+  rememberedAuthState = null;
   clearStoredToken();
 }
 
 async function ensureToken() {
   if (isDriveConnected()) return accessToken;
-  if (!accessToken && hasAttemptedSilentConnect) {
+  const restored = restoreStoredToken();
+  if (!restored && !accessToken) {
     throw new Error("Drive is not authorized yet. Please connect again.");
   }
   await ensureTokenClient();
