@@ -22,6 +22,8 @@ let tokenExpiresAt = 0;
 let rootFolderId = null;
 let gisReady = null;
 let tokenRefreshTimer = null;
+let authInFlight = false;
+let hasAttemptedSilentConnect = false;
 
 export const driveConfigured = () => Boolean(CLIENT_ID);
 export const isDriveConnected = () => Boolean(accessToken) && Date.now() < tokenExpiresAt;
@@ -38,7 +40,7 @@ function scheduleTokenRefresh() {
   tokenRefreshTimer = setTimeout(async () => {
     try {
       await ensureTokenClient();
-      await requestToken("");
+      await requestToken("none");
     } catch {
       /* let the next explicit Drive action retry */
     }
@@ -116,30 +118,27 @@ async function ensureTokenClient() {
 export async function connectDrive() {
   if (!CLIENT_ID) throw new Error("VITE_GOOGLE_CLIENT_ID is not set — see DRIVE_SETUP.md");
   await ensureTokenClient();
+  hasAttemptedSilentConnect = true;
   return requestToken("consent");
 }
 
-/* Called on every page load: if this browser already granted consent and
-   still has an active Google session, Google issues a fresh token with no
-   popup and no click. If not, it fails quietly — no UI shown, no prompt —
-   and the caller just falls back to the normal "Connect" button. */
+/* Called on page load: if this browser already granted consent and still
+   has an active Google session, Google can issue a fresh token without
+   showing a consent prompt. We only try it once per session so it doesn't
+   keep re-triggering the auth flow when the app regains focus. */
 export async function trySilentConnect() {
-  if (!CLIENT_ID) return false;
+  if (!CLIENT_ID || hasAttemptedSilentConnect || authInFlight) return false;
+  authInFlight = true;
   try {
     await ensureTokenClient();
-    for (const delay of [0, 1200, 2500]) {
-      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-      try {
-        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("silent connect timed out")), 6000));
-        await Promise.race([requestToken(""), timeout]);
-        return true;
-      } catch {
-        /* try again once more in case Google Identity Services is still settling */
-      }
-    }
-    return false;
+    const token = await requestToken("none");
+    hasAttemptedSilentConnect = Boolean(token);
+    return Boolean(token);
   } catch {
+    hasAttemptedSilentConnect = true;
     return false;
+  } finally {
+    authInFlight = false;
   }
 }
 
@@ -151,13 +150,17 @@ export function disconnectDrive() {
   accessToken = null;
   tokenExpiresAt = 0;
   rootFolderId = null;
+  hasAttemptedSilentConnect = false;
   clearStoredToken();
 }
 
 async function ensureToken() {
   if (isDriveConnected()) return accessToken;
+  if (!accessToken && hasAttemptedSilentConnect) {
+    throw new Error("Drive is not authorized yet. Please connect again.");
+  }
   await ensureTokenClient();
-  return requestToken(""); // silent renewal — the user already granted consent
+  return requestToken("none"); // silent renewal — the user already granted consent
 }
 
 async function driveFetch(path, opts = {}) {
